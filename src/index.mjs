@@ -100,6 +100,8 @@ const openSea = openSeaConfig(process.env, chainId);
 const globalTarget = {
   mintFunction: envOrConfig('MINT_FUNCTION', 'mintFunction', undefined),
   mintArgs: envJson('MINT_ARGS_JSON', cfg.mintArgs),
+  mintTarget: envOrConfig('MINT_TARGET', 'mintTarget', undefined),
+  seaDropPublicDrop: undefined,
   mintQuantity: envOrConfig('MINT_QUANTITY', 'mintQuantity', '1'),
   paymentMode: envOrConfig('PAYMENT_MODE', 'paymentMode', undefined),
   mintPriceNative: envOrConfig('MINT_PRICE_NATIVE', 'mintPriceNative', undefined),
@@ -172,6 +174,7 @@ async function runTarget(target, index) {
 
   let mintFunction = target.mintFunction;
   let mintArgs = target.mintArgs;
+  let mintTarget = target.mintTarget ? address(`${label}.mintTarget`, target.mintTarget) : nftAddress;
   if (!mintFunction && !Array.isArray(mintArgs) && target.autoDiscover !== false) {
     const plan = await discoverMintPlan({
       provider,
@@ -186,6 +189,9 @@ async function runTarget(target, index) {
     mintArgs = mintArgs || plan.mintArgs;
     if (target.mintPriceNative === undefined) target.mintPriceNative = plan.mintPriceNative;
     if (target.paymentMode === undefined) target.paymentMode = plan.paymentMode;
+    if (plan.executionTarget) mintTarget = address(`${label}.executionTarget`, plan.executionTarget);
+    if (plan.publicDrop) target.seaDropPublicDrop = plan.publicDrop;
+    if (plan.protocol) target.protocol = plan.protocol;
   }
   mintFunction = requiredString(`${label}.mintFunction`, mintFunction);
   if (!mintFunction.includes('(')) throw new Error(`${label}.mintFunction must be a full ABI signature; guessing is blocked.`);
@@ -215,6 +221,7 @@ async function runTarget(target, index) {
   const mintFragment = nftInterface.fragments.find(fragment => fragment.type === 'function');
   if (!mintFragment) throw new Error(`${label} mintFunction could not be parsed.`);
 
+  if (paymentMode === 'ERC20' && mintTarget !== nftAddress) throw new Error(`${label} SeaDrop/non-collection ERC-20 payment is blocked until its exact approval spender is verified.`);
   const paymentTokenAddress = paymentMode === 'ERC20'
     ? address(`${label}.paymentTokenAddress`, requiredString(`${label}.paymentTokenAddress`, target.paymentTokenAddress))
     : null;
@@ -238,12 +245,18 @@ async function runTarget(target, index) {
     PAYMENT_AMOUNT: paymentAmountUnits.toString(),
     TOKEN_ID: String(target.tokenId ?? '0')
   };
-  const resolvedMintArgs = mintArgs.map(value => typeof value === 'string' && Object.hasOwn(substitutions, value) ? substitutions[value] : value);
+  const resolvedMintArgs = mintArgs.map(value => {
+    if (value === 'SEADROP_PUBLIC_DROP') {
+      if (!Array.isArray(target.seaDropPublicDrop)) throw new Error(`${label} is missing the discovered SeaDrop public-drop tuple.`);
+      return target.seaDropPublicDrop;
+    }
+    return typeof value === 'string' && Object.hasOwn(substitutions, value) ? substitutions[value] : value;
+  });
   let mintData;
   try { mintData = nftInterface.encodeFunctionData(mintFragment.name, resolvedMintArgs); }
   catch (error) { throw new Error(`${label}.mintArgs do not match its ABI: ${error.shortMessage || error.message}`); }
 
-  const baseMintTx = { from: actor, to: nftAddress, data: mintData, value: nativeMintValue };
+  const baseMintTx = { from: actor, to: mintTarget, data: mintData, value: nativeMintValue };
   const paymentAllowance = paymentToken ? await paymentToken.allowance(actor, approvalSpender) : paymentAmountUnits;
   const approvalNeeded = paymentToken && paymentAllowance < paymentAmountUnits;
   let approvalCost = 0n;
@@ -285,11 +298,11 @@ async function runTarget(target, index) {
   if (nativeBalance < totalCost) throw new Error(`${label} native balance is below the payment plus bounded gas requirement.`);
   if (paymentToken && await paymentToken.balanceOf(actor) < paymentAmountUnits) throw new Error(`${label} payment-token balance is insufficient.`);
 
-  console.log(JSON.stringify({ event: 'PREFLIGHT_OK', mode: live ? 'LIVE' : 'DRY_RUN', target: label, chain: chainName, chainId, configPath: hasConfig ? configPath : '(environment only)', nftContract: nftAddress, standard: is721 ? 'ERC-721' : 'ERC-1155', mintFunction, mintQuantity, paymentMode, paymentToken: paymentTokenAddress, exactPayment: paymentMode === 'ERC20' ? ethers.formatUnits(paymentAmountUnits, paymentDecimals) : ethers.formatEther(nativeMintValue), gasType: fee.type, gasLimit: mintGasLimit.toString(), boundedGasUnitPrice: fee.unitPrice.toString(), mintGasCostNative: ethers.formatEther(mintGasCost), approvalGasCostNative: ethers.formatEther(approvalCost), totalCostNative: ethers.formatEther(totalCost), maxTotalCostNative: ethers.formatEther(maxTotalCostNative), wallet: actor }, null, 2));
+  console.log(JSON.stringify({ event: 'PREFLIGHT_OK', mode: live ? 'LIVE' : 'DRY_RUN', target: label, chain: chainName, chainId, configPath: hasConfig ? configPath : '(environment only)', nftContract: nftAddress, executionTarget: mintTarget, protocol: target.protocol || 'DIRECT', standard: is721 ? 'ERC-721' : 'ERC-1155', mintFunction, mintQuantity, paymentMode, paymentToken: paymentTokenAddress, exactPayment: paymentMode === 'ERC20' ? ethers.formatUnits(paymentAmountUnits, paymentDecimals) : ethers.formatEther(nativeMintValue), gasType: fee.type, gasLimit: mintGasLimit.toString(), boundedGasUnitPrice: fee.unitPrice.toString(), mintGasCostNative: ethers.formatEther(mintGasCost), approvalGasCostNative: ethers.formatEther(approvalCost), totalCostNative: ethers.formatEther(totalCost), maxTotalCostNative: ethers.formatEther(maxTotalCostNative), wallet: actor }, null, 2));
   if (!live) return { ok: true, dryRun: true };
 
   const mintTx = await wallet.sendTransaction({ ...baseMintTx, ...fee.override, gasLimit: mintGasLimit });
-  console.log(JSON.stringify({ event: 'MINT_SUBMITTED', target: label, nftContract: nftAddress, txHash: mintTx.hash }));
+  console.log(JSON.stringify({ event: 'MINT_SUBMITTED', target: label, nftContract: nftAddress, executionTarget: mintTarget, txHash: mintTx.hash }));
   const receipt = await mintTx.wait(confirmations);
   if (!receipt || Number(receipt.status) !== 1) throw new Error(`${label} mint transaction failed.`);
   console.log(JSON.stringify({ event: 'MINT_CONFIRMED', target: label, nftContract: nftAddress, txHash: receipt.hash, blockNumber: receipt.blockNumber, gasUsed: receipt.gasUsed.toString(), actualGasCostNative: ethers.formatEther(receipt.gasUsed * (receipt.gasPrice ?? fee.unitPrice)) }));
