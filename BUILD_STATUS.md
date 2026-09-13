@@ -8,7 +8,8 @@
 - One or many target contract addresses are accepted through environment variables; targets are processed sequentially to keep nonce handling deterministic.
 - `NFT_TARGETS_JSON` supports per-contract mint functions, quantities, prices, and payment settings without editing config files.
 - Optional OpenSea enrichment was added; it is metadata-only and never replaces direct RPC verification or authorizes execution.
-- Conservative auto-discovery now tests common public-mint signatures with read-only `eth_call`; ambiguous contracts remain blocked.
+- Conservative auto-discovery tests common public-mint signatures with read-only `eth_call`; ambiguous contracts remain blocked.
+- SeaDrop V1 discovery now reads allowed SeaDrop contracts, validates public-stage timing and wallet limits, builds `mintPublic` calldata, and routes the exact simulation to the discovered SeaDrop contract.
 - Target contract code and ERC-721/ERC-1155 ERC-165 support are verified.
 - Mint ABI must be supplied explicitly; the bot never guesses a function.
 - Native and ERC-20 payment paths are scaffolded.

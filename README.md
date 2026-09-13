@@ -18,6 +18,7 @@ V1 handles a **known NFT mint function** supplied with a full ABI signature. It 
 - `DRY_RUN=1` by default and a second `LIVE_TRADING=1` safety switch
 - Optional OpenSea free-tier enrichment for collection/NFT metadata; it never authorizes or submits a transaction
 - Conservative auto-discovery of common public-mint methods, prices, sale state, and payment-token signals through read-only `eth_call`
+- SeaDrop V1 discovery for ERC-721 collections: reads the collection's allowed SeaDrop contracts, validates the active public stage, builds `mintPublic` calldata, and simulates the exact SeaDrop transaction
 
 Secondary-market marketplace sniping is intentionally not in this first milestone. Marketplace orders require separate protocol adapters and should not be mixed into the public-mint executor.
 
@@ -100,6 +101,12 @@ NFT_TARGETS_JSON=[{"address":"0xContractOne","mintFunction":"mint(address,uint25
 `targets` is preferred when contracts differ. The bot processes targets sequentially, never concurrently, so one wallet nonce cannot collide with another execution. Supported argument placeholders are `WALLET_ADDRESS`, `MINT_QUANTITY`, `NFT_CONTRACT_ADDRESS`, `PAYMENT_AMOUNT`, and `TOKEN_ID`. Every other argument is passed exactly as configured.
 
 For an ERC-20 payment, set `PAYMENT_MODE=ERC20`, provide `PAYMENT_TOKEN_ADDRESS` and `PAYMENT_AMOUNT`, and optionally `APPROVAL_SPENDER`. V1 only permits the target NFT contract as the approval spender.
+
+### SeaDrop V1
+
+For a standard OpenSea SeaDrop V1 collection, leave `MINT_FUNCTION`, `MINT_ARGS_JSON`, and `MINT_PRICE_NATIVE` empty. Auto-discovery reads `getAllowedSeaDrop()` from the collection, reads each allowed contract's `getPublicDrop(address)` stage, rejects expired or future stages, validates the wallet quantity limit, and creates the exact `mintPublic` call. The transaction target is the discovered allowed SeaDrop contract, while the NFT contract remains the collection target. SeaDrop ERC-20 payment and arbitrary routers remain blocked until a separate exact-spender adapter is verified.
+
+A successful SeaDrop dry run must show `protocol: "SeaDrop"`, an active public stage, a successful exact `eth_call`, and `PREFLIGHT_OK`. A target that is listed as a drop but has no active stage or no readable allowed SeaDrop configuration remains blocked.
 
 ## Live-mode checklist
 
