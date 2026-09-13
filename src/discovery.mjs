@@ -73,6 +73,47 @@ async function readOptional(provider, contract, signature, returns, args = []) {
     return { status: 'ERROR', error: probeError(error) };
   }
 }
+const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
+const ZERO_TOPIC = ethers.zeroPadValue(ethers.ZeroAddress, 32);
+async function auditMintTransactions(provider, contract) {
+  const audit = { status: 'NOT_RUN', transferEvents: 0, mintTransactions: [] };
+  try {
+    const latest = await provider.getBlockNumber();
+    const configuredStart = process.env.MINT_AUDIT_FROM_BLOCK;
+    const window = Number(process.env.MINT_AUDIT_BLOCK_WINDOW || 1000000);
+    const chunk = Number(process.env.MINT_AUDIT_BLOCK_CHUNK || 10000);
+    const fromBlock = configuredStart ? Number(configuredStart) : Math.max(0, latest - window);
+    if (!Number.isSafeInteger(fromBlock) || fromBlock < 0 || fromBlock > latest) {
+      return { status: 'ERROR', error: 'invalid MINT_AUDIT_FROM_BLOCK' };
+    }
+    const transactionHashes = new Set();
+    for (let start = fromBlock; start <= latest; start += chunk) {
+      const end = Math.min(latest, start + chunk - 1);
+      const logs = await provider.getLogs({ address: contract, fromBlock: start, toBlock: end, topics: [TRANSFER_TOPIC, ZERO_TOPIC] });
+      audit.transferEvents += logs.length;
+      for (const log of logs) transactionHashes.add(log.transactionHash);
+    }
+    for (const hash of transactionHashes) {
+      const tx = await provider.getTransaction(hash);
+      if (!tx) continue;
+      audit.mintTransactions.push({
+        hash,
+        blockNumber: tx.blockNumber,
+        to: tx.to,
+        selector: tx.data && tx.data.length >= 10 ? tx.data.slice(0, 10) : null,
+        calldataBytes: tx.data ? Math.max(0, (tx.data.length - 2) / 2) : null,
+        valueWei: tx.value?.toString?.() ?? null
+      });
+    }
+    audit.status = 'OK';
+    audit.fromBlock = fromBlock;
+    audit.toBlock = latest;
+    audit.transactionCount = audit.mintTransactions.length;
+    return audit;
+  } catch (error) {
+    return { ...audit, status: 'ERROR', error: probeError(error) };
+  }
+}
 async function auditContract(provider, contract) {
   const audit = {};
   try {
@@ -113,6 +154,7 @@ async function auditContract(provider, contract) {
   } catch (error) {
     audit.eip1967ImplementationSlot = { status: 'ERROR', error: probeError(error) };
   }
+  audit.mintRouteAudit = await auditMintTransactions(provider, contract);
   return audit;
 }
 async function readUint(provider, target, signature) {
