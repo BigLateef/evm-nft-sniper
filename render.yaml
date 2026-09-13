@@ -1,0 +1,66 @@
+services:
+  - type: web
+    name: evm-nft-sniper
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: RPC_HTTP_URL
+        sync: false
+      - key: RPC_WS_URL
+        sync: false
+      - key: OPENSEA_API_KEY
+        sync: false
+      - key: OPENSEA_ENABLED
+        value: "1"
+      - key: OPENSEA_CHAIN
+        value: "ethereum"
+      - key: OPENSEA_TIMEOUT_MS
+        value: "2500"
+      - key: TARGET_NFT_CONTRACT_ADDRESS
+        sync: false
+      - key: TARGET_NFT_CONTRACT_ADDRESSES
+        sync: false
+      - key: NFT_TARGETS_JSON
+        sync: false
+      - key: MINT_FUNCTION
+        sync: false
+      - key: MINT_ARGS_JSON
+        sync: false
+      - key: MINT_QUANTITY
+        value: "1"
+      - key: AUTO_DISCOVER_MINT
+        value: "1"
+      - key: PAYMENT_MODE
+        value: "NATIVE"
+      - key: MINT_PRICE_NATIVE
+        sync: false
+      - key: PAYMENT_TOKEN_ADDRESS
+        sync: false
+      - key: PAYMENT_AMOUNT
+        sync: false
+      - key: APPROVAL_SPENDER
+        sync: false
+      - key: AUTO_APPROVE
+        value: "true"
+      - key: GAS_BUFFER_BPS
+        value: "2000"
+      - key: MAX_MINT_PRICE_NATIVE
+        sync: false
+      - key: MAX_APPROVAL_GAS_COST_NATIVE
+        sync: false
+      - key: MAX_TOTAL_COST_NATIVE
+        sync: false
+      - key: CONFIRMATIONS
+        value: "1"
+      - key: SIMULATION_ADDRESS
+        sync: false
+      - key: SNIPER_PRIVATE_KEY
+        sync: false
+      - key: DRY_RUN
+        value: "1"
+      - key: LIVE_TRADING
+        value: "0"

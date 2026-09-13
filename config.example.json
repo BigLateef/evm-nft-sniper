@@ -1,0 +1,23 @@
+{
+  "chainId": 8453,
+  "chainName": "Base",
+  "nftContractAddress": "",
+  "nftContractAddresses": [],
+  "targets": [],
+  "mintFunction": "mint(address,uint256)",
+  "mintArgs": ["WALLET_ADDRESS", "MINT_QUANTITY"],
+  "mintQuantity": "1",
+  "paymentMode": "NATIVE",
+  "mintPriceNative": "0",
+  "paymentTokenAddress": "",
+  "paymentAmount": "0",
+  "approvalSpender": "",
+  "autoApprove": true,
+  "gasBufferBps": 2000,
+  "maxMintPriceNative": "0.05",
+  "maxApprovalGasCostNative": "0.001",
+  "maxTotalCostNative": "0.06",
+  "confirmations": 1,
+  "pollMs": 1500,
+  "dryRun": true
+}
