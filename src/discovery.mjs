@@ -57,6 +57,9 @@ function ifaceFor(signature, returns) {
 function isZeroAddress(value) {
   return value === '0x0000000000000000000000000000000000000000';
 }
+function probeError(error) {
+  return error?.shortMessage || error?.reason || error?.code || 'eth_call failed';
+}
 async function readUint(provider, target, signature) {
   const iface = ifaceFor(signature, 'uint256');
   try {
@@ -85,8 +88,13 @@ async function readAllowedSeaDrop(provider, contract) {
     const data = iface.encodeFunctionData('getAllowedSeaDrop', []);
     const result = await provider.call({ to: contract, data });
     const [addresses] = iface.decodeFunctionResult('getAllowedSeaDrop', result);
-    return Array.isArray(addresses) ? addresses.filter(value => value && !isZeroAddress(value)) : [];
-  } catch { return null; }
+    if (!addresses || typeof addresses.filter !== 'function') {
+      return { ok: false, addresses: [], error: 'getAllowedSeaDrop returned an unexpected ABI shape' };
+    }
+    return { ok: true, addresses: addresses.filter(value => value && !isZeroAddress(value)) };
+  } catch (error) {
+    return { ok: false, addresses: [], error: probeError(error) };
+  }
 }
 async function readPublicDrop(provider, seaDrop, nftContract) {
   const iface = new ethers.Interface(SEADROP_ABI);
@@ -95,32 +103,54 @@ async function readPublicDrop(provider, seaDrop, nftContract) {
     const result = await provider.call({ to: seaDrop, data });
     const [drop] = iface.decodeFunctionResult('getPublicDrop', result);
     return {
-      mintPrice: BigInt(drop.mintPrice),
-      startTime: BigInt(drop.startTime),
-      endTime: BigInt(drop.endTime),
-      maxTotalMintableByWallet: BigInt(drop.maxTotalMintableByWallet),
-      feeBPS: Number(drop.feeBPS),
-      feeRecipient: drop.feeRecipient
+      ok: true,
+      drop: {
+        mintPrice: BigInt(drop.mintPrice),
+        startTime: BigInt(drop.startTime),
+        endTime: BigInt(drop.endTime),
+        maxTotalMintableByWallet: BigInt(drop.maxTotalMintableByWallet),
+        feeBPS: Number(drop.feeBPS),
+        feeRecipient: drop.feeRecipient
+      }
     };
-  } catch { return null; }
+  } catch (error) {
+    return { ok: false, error: probeError(error) };
+  }
 }
 
 async function discoverSeaDropPlan({ provider, contract, quantity, configuredPriceNative }) {
-  const allowedSeaDrop = await readAllowedSeaDrop(provider, contract);
-  if (allowedSeaDrop === null || allowedSeaDrop.length === 0) return null;
+  const allowedResult = await readAllowedSeaDrop(provider, contract);
+  const seaDropProbe = {
+    method: 'getAllowedSeaDrop() eth_call',
+    status: allowedResult.ok ? (allowedResult.addresses.length ? 'OK' : 'EMPTY') : 'ERROR',
+    allowedSeaDropCount: allowedResult.addresses.length,
+    error: allowedResult.error || null
+  };
+  if (!allowedResult.ok || allowedResult.addresses.length === 0) return { seaDropProbe };
+  const allowedSeaDrop = allowedResult.addresses;
 
   const latest = await provider.getBlock('latest');
-  if (!latest || latest.timestamp == null) return { blocked: true, protocol: 'SeaDrop', reason: 'could not read latest block time for SeaDrop stage validation' };
+  if (!latest || latest.timestamp == null) return { blocked: true, protocol: 'SeaDrop', seaDropProbe, reason: 'could not read latest block time for SeaDrop stage validation' };
   const now = BigInt(latest.timestamp);
   const requestedQuantity = BigInt(quantity);
   const futureStages = [];
   const expiredStages = [];
+  const publicDropErrors = [];
+  const zeroCodeAddresses = [];
 
   for (const seaDrop of allowedSeaDrop) {
     const code = await provider.getCode(seaDrop);
-    if (code === '0x') continue;
-    const drop = await readPublicDrop(provider, seaDrop, contract);
-    if (!drop || drop.mintPrice === 0n && drop.startTime === 0n && drop.endTime === 0n) continue;
+    if (code === '0x') {
+      zeroCodeAddresses.push(seaDrop);
+      continue;
+    }
+    const publicDropResult = await readPublicDrop(provider, seaDrop, contract);
+    if (!publicDropResult.ok) {
+      publicDropErrors.push({ seaDrop, error: publicDropResult.error });
+      continue;
+    }
+    const drop = publicDropResult.drop;
+    if (drop.mintPrice === 0n && drop.startTime === 0n && drop.endTime === 0n) continue;
 
     if (drop.startTime > now) {
       futureStages.push({ seaDrop, startTime: drop.startTime });
@@ -152,16 +182,16 @@ async function discoverSeaDropPlan({ provider, contract, quantity, configuredPri
       publicDrop: [drop.mintPrice.toString(), drop.startTime.toString(), drop.endTime.toString(), drop.maxTotalMintableByWallet.toString(), drop.feeBPS, drop.feeRecipient],
       mintPriceNative,
       paymentMode: 'NATIVE',
-      evidence: { source: 'read-only SeaDrop getPublicDrop eth_call', stage: 'active', allowedSeaDropCount: allowedSeaDrop.length }
+      evidence: { source: 'read-only SeaDrop getPublicDrop eth_call', stage: 'active', allowedSeaDropCount: allowedSeaDrop.length, seaDropProbe, publicDropErrors, zeroCodeAddresses }
     };
   }
 
   if (futureStages.length) {
     const next = futureStages.sort((a, b) => Number(a.startTime - b.startTime))[0];
-    return { blocked: true, protocol: 'SeaDrop', seaDropAddress: next.seaDrop, reason: `SeaDrop public stage is upcoming at unix time ${next.startTime.toString()}` };
+    return { blocked: true, protocol: 'SeaDrop', seaDropAddress: next.seaDrop, seaDropProbe, reason: `SeaDrop public stage is upcoming at unix time ${next.startTime.toString()}`, evidence: { publicDropErrors, zeroCodeAddresses } };
   }
-  if (expiredStages.length) return { blocked: true, protocol: 'SeaDrop', reason: 'all discovered SeaDrop public stages have ended' };
-  return { blocked: true, protocol: 'SeaDrop', reason: 'SeaDrop support detected but no readable public stage was found' };
+  if (expiredStages.length) return { blocked: true, protocol: 'SeaDrop', seaDropProbe, reason: 'all discovered SeaDrop public stages have ended', evidence: { publicDropErrors, zeroCodeAddresses } };
+  return { blocked: true, protocol: 'SeaDrop', seaDropProbe, reason: 'SeaDrop support detected but no readable public stage was found', evidence: { publicDropErrors, zeroCodeAddresses } };
 }
 
 function candidateArgs(shape, actor, quantity) {
@@ -178,7 +208,8 @@ export async function discoverMintPlan({ provider, contract, actor, quantity = '
   if (requestedQuantity <= 0n) return { blocked: true, reason: 'MINT_QUANTITY must be greater than zero' };
 
   const seaDropPlan = await discoverSeaDropPlan({ provider, contract, quantity: String(requestedQuantity), configuredPriceNative });
-  if (seaDropPlan) return seaDropPlan;
+  if (seaDropPlan?.blocked) return seaDropPlan;
+  const seaDropProbe = seaDropPlan?.seaDropProbe || null;
 
   const states = [];
   for (const signature of STATE_METHODS) {
@@ -231,10 +262,10 @@ export async function discoverMintPlan({ provider, contract, actor, quantity = '
         mintArgs: shape.map(value => value === 'WALLET' ? 'WALLET_ADDRESS' : 'MINT_QUANTITY'),
         mintPriceNative: ethers.formatEther(value),
         paymentMode: 'NATIVE',
-        evidence: { source: 'read-only eth_call', priceSource: priceWei === null ? 'successful zero-value simulation' : 'price view/config' }
+        evidence: { source: 'read-only eth_call', priceSource: priceWei === null ? 'successful zero-value simulation' : 'price view/config', seaDropProbe }
       };
     } catch { /* try the next known safe shape */ }
   }
 
-  return { blocked: true, reason: priceWei === null ? 'no safe common mint shape simulated and no readable mint price found' : 'no safe common mint shape simulated at the discovered price' };
+  return { blocked: true, reason: priceWei === null ? 'no safe common mint shape simulated and no readable mint price found' : 'no safe common mint shape simulated at the discovered price', evidence: { seaDropProbe } };
 }
