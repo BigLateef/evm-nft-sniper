@@ -60,6 +60,61 @@ function isZeroAddress(value) {
 function probeError(error) {
   return error?.shortMessage || error?.reason || error?.code || 'eth_call failed';
 }
+async function readOptional(provider, contract, signature, returns, args = []) {
+  const iface = ifaceFor(signature, returns);
+  const name = signature.split('(')[0];
+  try {
+    const data = iface.encodeFunctionData(name, args);
+    const result = await provider.call({ to: contract, data });
+    const decoded = iface.decodeFunctionResult(name, result);
+    const value = decoded.length === 1 ? decoded[0] : decoded;
+    return { status: 'OK', value: typeof value === 'bigint' ? value.toString() : value };
+  } catch (error) {
+    return { status: 'ERROR', error: probeError(error) };
+  }
+}
+async function auditContract(provider, contract) {
+  const audit = {};
+  try {
+    const code = await provider.getCode(contract);
+    audit.codeBytes = code === '0x' ? 0 : (code.length - 2) / 2;
+    audit.codeHash = code === '0x' ? null : ethers.keccak256(code);
+  } catch (error) {
+    audit.code = { status: 'ERROR', error: probeError(error) };
+  }
+  const supportsInterface = new ethers.Interface(['function supportsInterface(bytes4) view returns (bool)']);
+  audit.erc165 = {};
+  for (const [label, interfaceId] of [['ERC721', '0x80ac58cd'], ['ERC1155', '0xd9b67a26']]) {
+    try {
+      const data = supportsInterface.encodeFunctionData('supportsInterface', [interfaceId]);
+      const result = await provider.call({ to: contract, data });
+      audit.erc165[label] = { status: 'OK', value: supportsInterface.decodeFunctionResult('supportsInterface', result)[0] };
+    } catch (error) {
+      audit.erc165[label] = { status: 'ERROR', error: probeError(error) };
+    }
+  }
+  const getters = [
+    ['name()', 'string'],
+    ['symbol()', 'string'],
+    ['totalSupply()', 'uint256'],
+    ['owner()', 'address'],
+    ['getSeaDrop()', 'address'],
+    ['seaDrop()', 'address'],
+    ['implementation()', 'address'],
+    ['getImplementation()', 'address'],
+    ['proxiableUUID()', 'bytes32']
+  ];
+  audit.getters = {};
+  for (const [signature, returns] of getters) audit.getters[signature] = await readOptional(provider, contract, signature, returns);
+  try {
+    const slot = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
+    const raw = await provider.getStorage(contract, slot);
+    audit.eip1967ImplementationSlot = raw && raw !== '0x' ? ethers.getAddress(`0x${raw.slice(-40)}`) : null;
+  } catch (error) {
+    audit.eip1967ImplementationSlot = { status: 'ERROR', error: probeError(error) };
+  }
+  return audit;
+}
 async function readUint(provider, target, signature) {
   const iface = ifaceFor(signature, 'uint256');
   try {
@@ -126,7 +181,10 @@ async function discoverSeaDropPlan({ provider, contract, quantity, configuredPri
     allowedSeaDropCount: allowedResult.addresses.length,
     error: allowedResult.error || null
   };
-  if (!allowedResult.ok || allowedResult.addresses.length === 0) return { seaDropProbe };
+  if (!allowedResult.ok || allowedResult.addresses.length === 0) {
+    seaDropProbe.contractAudit = await auditContract(provider, contract);
+    return { seaDropProbe };
+  }
   const allowedSeaDrop = allowedResult.addresses;
 
   const latest = await provider.getBlock('latest');
