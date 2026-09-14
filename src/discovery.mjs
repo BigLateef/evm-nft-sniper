@@ -58,7 +58,7 @@ function isZeroAddress(value) {
   return value === '0x0000000000000000000000000000000000000000';
 }
 function probeError(error) {
-  return error?.shortMessage || error?.reason || error?.code || 'eth_call failed';
+  return error?.info?.error?.message || error?.error?.message || error?.shortMessage || error?.reason || error?.code || error?.message || 'eth_call failed';
 }
 async function readOptional(provider, contract, signature, returns, args = []) {
   const iface = ifaceFor(signature, returns);
@@ -75,13 +75,34 @@ async function readOptional(provider, contract, signature, returns, args = []) {
 }
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 const ZERO_TOPIC = ethers.zeroPadValue(ethers.ZeroAddress, 32);
+async function fetchTransferMintLogs(provider, contract, fromBlock, toBlock) {
+  const filter = { address: contract, fromBlock, toBlock, topics: [TRANSFER_TOPIC, ZERO_TOPIC] };
+  try {
+    return await provider.getLogs(filter);
+  } catch (firstError) {
+    try {
+      const rawFilter = {
+        address: contract,
+        fromBlock: ethers.toQuantity(fromBlock),
+        toBlock: ethers.toQuantity(toBlock),
+        topics: [TRANSFER_TOPIC]
+      };
+      const logs = await provider.send('eth_getLogs', [rawFilter]);
+      return logs.filter(log => log.topics?.[1]?.toLowerCase() === ZERO_TOPIC.toLowerCase());
+    } catch (secondError) {
+      const error = new Error(`${probeError(firstError)}; raw eth_getLogs fallback: ${probeError(secondError)}`);
+      error.shortMessage = error.message;
+      throw error;
+    }
+  }
+}
 async function auditMintTransactions(provider, contract) {
   const audit = { status: 'NOT_RUN', transferEvents: 0, mintTransactions: [] };
   try {
     const latest = await provider.getBlockNumber();
     const configuredStart = process.env.MINT_AUDIT_FROM_BLOCK;
-    const window = Number(process.env.MINT_AUDIT_BLOCK_WINDOW || 1000000);
-    const chunk = Number(process.env.MINT_AUDIT_BLOCK_CHUNK || 10000);
+    const window = Number(process.env.MINT_AUDIT_BLOCK_WINDOW || 250000);
+    const chunk = Number(process.env.MINT_AUDIT_BLOCK_CHUNK || 2000);
     const fromBlock = configuredStart ? Number(configuredStart) : Math.max(0, latest - window);
     if (!Number.isSafeInteger(fromBlock) || fromBlock < 0 || fromBlock > latest) {
       return { status: 'ERROR', error: 'invalid MINT_AUDIT_FROM_BLOCK' };
@@ -89,7 +110,7 @@ async function auditMintTransactions(provider, contract) {
     const transactionHashes = new Set();
     for (let start = fromBlock; start <= latest; start += chunk) {
       const end = Math.min(latest, start + chunk - 1);
-      const logs = await provider.getLogs({ address: contract, fromBlock: start, toBlock: end, topics: [TRANSFER_TOPIC, ZERO_TOPIC] });
+      const logs = await fetchTransferMintLogs(provider, contract, start, end);
       audit.transferEvents += logs.length;
       for (const log of logs) transactionHashes.add(log.transactionHash);
     }
